@@ -49,7 +49,7 @@ from datetime import datetime
 
 
 
-# ---------- Helpers ----------
+# ---------- Helper Functions ----------
 
 def parse_date(value) -> Optional[str]:
     # Handles None, NaN, empty strings
@@ -60,7 +60,7 @@ def parse_date(value) -> Optional[str]:
     if not s:
         return None
 
-    # Your CSV is MM/DD/YYYY — parse it directly (most reliable)
+    # parses CSV in MM/DD/YYYY form
     try:
         return datetime.strptime(s, "%m/%d/%Y").date().isoformat()
     except Exception:
@@ -72,6 +72,7 @@ def parse_date(value) -> Optional[str]:
     except Exception:
         return None
 
+# Return cleaned string
 def to_number(value) -> Optional[float]:
     if value is None:
         return None
@@ -83,7 +84,7 @@ def to_number(value) -> Optional[float]:
     except Exception:
         return None
 
-
+# Splits Planting column in CSV to "PLant Name" and "Variety"
 def split_planting(value: str) -> Tuple[Optional[str], Optional[str]]:
     """
     Example:
@@ -108,7 +109,7 @@ def clean_headers(headers: List[str]) -> List[str]:
         headers.pop()
     return headers
 
-
+# Parses each row of the CSV into dictionary using headers as keys
 def row_to_dict(headers: List[str], row: List[str]) -> Dict[str, str]:
     if len(row) > len(headers):
         row = row[: len(headers)]
@@ -116,7 +117,7 @@ def row_to_dict(headers: List[str], row: List[str]) -> Dict[str, str]:
         row = row + [""] * (len(headers) - len(row))
     return {headers[i]: row[i] for i in range(len(headers))}
 
-
+# Going through and dividing the CSV file into multiple sections (Container Sow --> GH; Transplant, Precision Sow --> Row)
 def read_tend_multisection_csv(path: str) -> pd.DataFrame:
     """
     Reads Tend export CSVs that contain multiple sections with repeated headers.
@@ -171,10 +172,11 @@ def transform(df: pd.DataFrame) -> pd.DataFrame:
 
     plant_name, variety = zip(*df["Planting"].map(split_planting))
 
+    # Supabase Column Name : CSV Column Name mapping
     out = pd.DataFrame(
         {
             "Tend ID": df["Task Id"].astype(str).str.strip(),
-            "task_type": df["Task Type"].astype(str).str.strip(),
+            "task_type": df["Task Type"].astype(str).str.strip(), # not a supabase column, meant to map rows into either Direct or Transplant for Direct/Transplant column
             "Date": df["Start Date"].map(parse_date),
             "Plant Name": pd.Series(plant_name, dtype="string"),
             "Variety": pd.Series(variety, dtype="string"),
@@ -190,7 +192,7 @@ def transform(df: pd.DataFrame) -> pd.DataFrame:
 
     return out
 
-
+# Inserting row-by-row into Supabase
 def upsert_table(sb, table: str, rows: List[dict], conflict_col: str = "Tend ID"):
     if not rows:
         print(f"[{table}] No rows to upsert.")
@@ -208,6 +210,7 @@ def main():
 
     csv_path = sys.argv[1]
 
+    # Important Supabase attributes --> allow upsert
     supabase_url = os.environ["SUPABASE_URL"]
     supabase_key = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
     table_gh = os.environ.get("SUPABASE_TABLE_GH", "gh_planting_log")
@@ -215,6 +218,7 @@ def main():
 
     sb = create_client(supabase_url, supabase_key)
 
+    # Divides raw CSV into sections
     raw = read_tend_multisection_csv(csv_path)
     if raw.empty:
         print("No rows found in CSV after parsing.")
