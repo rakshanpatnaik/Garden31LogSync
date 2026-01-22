@@ -33,18 +33,90 @@ Run:
 """
 
 import os
-from dotenv import load_dotenv
-load_dotenv()
-
-
 import sys
 import csv
+import tempfile
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
+import requests
+from dotenv import load_dotenv
 from dateutil import parser as dateparser
 from supabase import create_client
-from datetime import datetime
+
+load_dotenv()
+
+GRAPH_BASE = "https://graph.microsoft.com/v1.0"
+
+# =========================
+# Microsoft Graph helpers
+# =========================
+
+def get_graph_token() -> str:
+    token_url = (
+        f"https://login.microsoftonline.com/{os.environ['MS_TENANT_ID']}/oauth2/v2.0/token"
+    )
+    data = {
+        "client_id": os.environ["MS_CLIENT_ID"],
+        "client_secret": os.environ["MS_CLIENT_SECRET"],
+        "grant_type": "client_credentials",
+        "scope": "https://graph.microsoft.com/.default",
+    }
+    resp = requests.post(token_url, data=data)
+    resp.raise_for_status()
+    return resp.json()["access_token"]
+
+
+def list_csv_files(token: str) -> list[dict]:
+    headers = {"Authorization": f"Bearer {token}"}
+    mode = os.environ.get("MS_DRIVE_MODE", "onedrive").lower()
+
+    if mode == "onedrive":
+        user = os.environ["ONEDRIVE_USER_PRINCIPAL_NAME"]
+        folder = os.environ["ONEDRIVE_FOLDER_PATH"]
+        url = f"{GRAPH_BASE}/users/{user}/drive/root:{folder}:/children"
+    else:
+        site_id = os.environ["SP_SITE_ID"]
+        drive_id = os.environ["SP_DRIVE_ID"]
+        folder = os.environ["SP_FOLDER_PATH"]
+        url = f"{GRAPH_BASE}/sites/{site_id}/drives/{drive_id}/root:{folder}:/children"
+
+    resp = requests.get(url, headers=headers)
+    resp.raise_for_status()
+    items = resp.json().get("value", [])
+    # Only CSVs
+    return [it for it in items if it.get("name", "").lower().endswith(".csv")]
+
+
+def fetch_latest_csv() -> Optional[str]:
+    """Download the latest CSV from OneDrive/SharePoint to a temp file and return its path."""
+    token = get_graph_token()
+    csv_items = list_csv_files(token)
+    if not csv_items:
+        print("No CSV files found in the configured folder.")
+        return None
+
+    latest = sorted(
+        csv_items,
+        key=lambda it: dateparser.parse(it["lastModifiedDateTime"]),
+        reverse=True,
+    )[0]
+
+    headers = {"Authorization": f"Bearer {token}"}
+    drive_id = latest["parentReference"]["driveId"]
+    file_id = latest["id"]
+    download_url = f"{GRAPH_BASE}/drives/{drive_id}/items/{file_id}/content"
+
+    resp = requests.get(download_url, headers=headers)
+    resp.raise_for_status()
+
+    fd, path = tempfile.mkstemp(suffix=".csv")
+    with os.fdopen(fd, "wb") as f:
+        f.write(resp.content)
+
+    print(f"Downloaded latest CSV: {latest['name']} → {path}")
+    return path
 
 
 
