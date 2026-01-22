@@ -276,13 +276,14 @@ def upsert_table(sb, table: str, rows: List[dict], conflict_col: str = "Tend ID"
 # ---------- Main ----------
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python tend_export_to_two_tables.py /path/to/ExportTask (3).csv")
-        sys.exit(1)
+    print("Fetching latest CSV from OneDrive/SharePoint...")
 
-    csv_path = sys.argv[1]
+    csv_path = fetch_latest_csv()
+    if not csv_path:
+        print("No CSV files found in the configured folder. Exiting.")
+        return
 
-    # Important Supabase attributes --> allow upsert
+    # Supabase config
     supabase_url = os.environ["SUPABASE_URL"]
     supabase_key = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
     table_gh = os.environ.get("SUPABASE_TABLE_GH", "gh_planting_log")
@@ -290,7 +291,7 @@ def main():
 
     sb = create_client(supabase_url, supabase_key)
 
-    # Divides raw CSV into sections
+    # Parse CSV into sections
     raw = read_tend_multisection_csv(csv_path)
     if raw.empty:
         print("No rows found in CSV after parsing.")
@@ -301,14 +302,17 @@ def main():
     # ---- gh_planting_log: Container Sow ----
     gh_df = norm[norm["task_type"].str.lower() == "container sow"].copy()
 
-    # (Leaving gh mapping as the normalized fields; adjust if gh table has different columns.)
-    gh_rows = gh_df[["Tend ID", "Date", "Plant Name", "Variety", "Quantity"]].to_dict(orient="records")
+    gh_rows = gh_df[
+        ["Tend ID", "Date", "Plant Name", "Variety", "Quantity"]
+    ].to_dict(orient="records")
+
     upsert_table(sb, table_gh, gh_rows, conflict_col="Tend ID")
 
     # ---- row_planting_log: Transplant + Precision Sow ----
-    row_df = norm[norm["task_type"].str.lower().isin(["transplant", "precision sow"])].copy()
+    row_df = norm[
+        norm["task_type"].str.lower().isin(["transplant", "precision sow"])
+    ].copy()
 
-    # Map Task Type -> "Direct/Transplant"
     def map_direct_transplant(tt: Optional[str]) -> Optional[str]:
         if tt is None:
             return None
@@ -321,22 +325,9 @@ def main():
 
     row_df["Direct/Transplant"] = row_df["task_type"].map(map_direct_transplant)
 
-    # Build payload with your requested column names for row_planting_log
-    row_payload = []
-    for _, r in row_df.iterrows():
-        row_payload.append(
-            {
-                "Tend ID": r["Tend ID"],
-                "Date": r["Date"],  
-                "Plant Name": r["Plant Name"],
-                "Variety": r["Variety"],
-                "Location": r["Location"],
-                "Spacing": r["Spacing"],
-                "Direct/Transplant": r["Direct/Transplant"],
-            }
-        )
-
-
+    row_payload = row_df[
+        ["Tend ID", "Date", "Plant Name", "Variety", "Location", "Spacing", "Direct/Transplant"]
+    ].to_dict(orient="records")
 
     upsert_table(sb, table_row, row_payload, conflict_col="Tend ID")
 
@@ -344,6 +335,7 @@ def main():
     print(f"  Parsed rows total: {len(norm)}")
     print(f"  gh_planting_log (Container Sow): {len(gh_df)}")
     print(f"  row_planting_log (Transplant/Precision Sow): {len(row_df)}")
+
 
 
 if __name__ == "__main__":
