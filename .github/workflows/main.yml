@@ -1,0 +1,45 @@
+name: Tend CSV Polling Sync
+
+on:
+  schedule:
+    # Every 15 minutes
+    - cron: "*/15 * * * *"
+  # Allow manual runs from the GitHub UI
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      SUPABASE_TABLE_GH: ${{ secrets.SUPABASE_TABLE_GH }}
+      SUPABASE_TABLE_ROW: ${{ secrets.SUPABASE_TABLE_ROW }}
+      MS_TENANT_ID: ${{ secrets.MS_TENANT_ID }}
+      MS_CLIENT_ID: ${{ secrets.MS_CLIENT_ID }}
+      MS_CLIENT_SECRET: ${{ secrets.MS_CLIENT_SECRET }}
+      MS_DRIVE_MODE: ${{ secrets.MS_DRIVE_MODE }}
+      ONEDRIVE_USER_PRINCIPAL_NAME: ${{ secrets.ONEDRIVE_USER_PRINCIPAL_NAME }}
+      ONEDRIVE_FOLDER_PATH: ${{ secrets.ONEDRIVE_FOLDER_PATH }}
+      SP_SITE_ID: ${{ secrets.SP_SITE_ID }}
+      SP_DRIVE_ID: ${{ secrets.SP_DRIVE_ID }}
+      SP_FOLDER_PATH: ${{ secrets.SP_FOLDER_PATH }}
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas requests python-dotenv python-dateutil supabase
+
+      - name: Run Tend sync
+        run: |
+          python main.py
