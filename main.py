@@ -44,6 +44,7 @@ import requests
 from dotenv import load_dotenv
 from dateutil import parser as dateparser
 from supabase import create_client
+import urllib.parse
 
 load_dotenv()
 
@@ -72,18 +73,124 @@ def list_csv_files(token: str) -> list[dict]:
     headers = {"Authorization": f"Bearer {token}"}
     mode = os.environ.get("MS_DRIVE_MODE", "onedrive").lower()
 
-    if mode == "onedrive":
-        user = os.environ["ONEDRIVE_USER_PRINCIPAL_NAME"]
-        folder = os.environ["ONEDRIVE_FOLDER_PATH"]
-        url = f"{GRAPH_BASE}/users/{user}/drive/root:{folder}:/children"
-    else:
-        site_id = os.environ["SP_SITE_ID"]
-        drive_id = os.environ["SP_DRIVE_ID"]
-        folder = os.environ["SP_FOLDER_PATH"]
-        url = f"{GRAPH_BASE}/sites/{site_id}/drives/{drive_id}/root:{folder}:/children"
+    # if mode == "onedrive":
+    #     user = os.environ["ONEDRIVE_USER_PRINCIPAL_NAME"]
+    #     folder = os.environ["ONEDRIVE_FOLDER_PATH"]
+    #     url = f"{GRAPH_BASE}/users/{user}/drive/root:{folder}:/children"
+    # else:
+    # site_id: Identifies the SharePoint site. Format: "hostname,site-id,web-id"
+    #   - Points to a specific SharePoint site (e.g., "G31 Full OD")
+    #   - Used to access: /sites/{site_id}
+    site_id = os.environ.get("SP_SITE_ID", "garden31.sharepoint.com,4ad005f5-11fd-4ed4-ba8e-145033cffe7b,1894ad69-30ef-419b-885a-9a413a662b2d")
+    
+    # drive_id: Identifies a document library (drive) within the site
+    #   - A SharePoint site can have multiple drives (document libraries)
+    #   - Each drive has its own ID (e.g., "Documents", "Shared Documents")
+    #   - Used to access: /sites/{site_id}/drives/{drive_id}
+    #   - If not provided, the code will auto-detect the default drive
+    drive_id = os.environ.get("SP_DRIVE_ID", "e3ae2c9f-a183-4c5e-9d3a-d6c0d8258870")
+    
+    # folder: The path within the drive to the target folder
+    #   - Relative to the drive root (no leading slash)
+    #   - Example: "Garden 31/Operations/Evaluation & Impact/..."
+    folder = os.environ.get("SP_FOLDER_PATH", "Garden 31/Operations/Evaluation & Impact/Outcome Metrics/Tend Exports")
+    
+    # First, try to get the default drive if drive_id might be wrong
+    if not drive_id or drive_id == "e3ae2c9f-a183-4c5e-9d3a-d6c0d8258870":
+        print("DEBUG: Attempting to get default drive from site...")
+        site_url = f"{GRAPH_BASE}/sites/{site_id}"
+        site_resp = requests.get(site_url, headers=headers)
+        if site_resp.ok:
+            site_data = site_resp.json()
+            print(f"DEBUG: Site accessed successfully: {site_data.get('displayName', 'Unknown')}")
+            # Try to get drives
+            drives_url = f"{GRAPH_BASE}/sites/{site_id}/drives"
+            drives_resp = requests.get(drives_url, headers=headers)
+            if drives_resp.ok:
+                drives = drives_resp.json().get("value", [])
+                if drives:
+                    # Use the first drive (usually the default document library)
+                    drive_id = drives[0]["id"]
+                    print(f"DEBUG: Using drive: {drives[0].get('name', 'Unknown')} (ID: {drive_id})")
+                else:
+                    print("WARNING: No drives found, using provided drive_id")
+            else:
+                print(f"WARNING: Could not list drives: {drives_resp.status_code}")
+        else:
+            print(f"WARNING: Could not access site: {site_resp.status_code} - {site_resp.text}")
+    
+    # Encode each path segment separately (Microsoft Graph API requirement)
+    # Remove leading/trailing slashes if present
+    folder = folder.strip('/')
+    # Split by / and encode each segment, then join back
+    path_segments = folder.split('/')
+    encoded_segments = [urllib.parse.quote(seg, safe='') for seg in path_segments]
+    encoded_folder = '/'.join(encoded_segments)
+
+    # Build the URL - Microsoft Graph API format: root:{path}:/children
+    # Path should NOT have leading slash
+    url = f"{GRAPH_BASE}/sites/{site_id}/drives/{drive_id}/root:{encoded_folder}:/children"
+    
+    print(f"DEBUG: Requesting URL: {url}")
+    print(f"DEBUG: Original folder path: {folder}")
+    print(f"DEBUG: Encoded folder path: {encoded_folder}")
 
     resp = requests.get(url, headers=headers)
-    resp.raise_for_status()
+    if not resp.ok:
+        error_text = resp.text
+        print(f"ERROR: Status {resp.status_code}")
+        print(f"ERROR: Response: {error_text}")
+        print("INFO: Path-based access failed, trying folder-by-folder navigation using IDs...")
+        
+        # Alternative: Navigate folder by folder using item IDs (more reliable)
+        root_url = f"{GRAPH_BASE}/sites/{site_id}/drives/{drive_id}/root/children"
+        root_resp = requests.get(root_url, headers=headers)
+        if not root_resp.ok:
+            print(f"ERROR: Cannot access root: {root_resp.status_code} - {root_resp.text}")
+            resp.raise_for_status()
+        
+        # Navigate through the folder path step by step
+        current_items = root_resp.json().get("value", [])
+        current_folder_id = None
+        
+        for i, segment in enumerate(path_segments):
+            # Find the folder by name in current level
+            found_folder = None
+            for item in current_items:
+                if item.get("name") == segment and "folder" in item:
+                    found_folder = item
+                    break
+            
+            if not found_folder:
+                print(f"ERROR: Folder '{segment}' not found at level {i+1}")
+                print(f"Available items at this level:")
+                for item in current_items:
+                    item_type = "folder" if "folder" in item else "file"
+                    print(f"  - {item.get('name', 'Unknown')} ({item_type})")
+                resp.raise_for_status()
+            
+            current_folder_id = found_folder["id"]
+            print(f"SUCCESS: Found '{segment}' (ID: {current_folder_id})")
+            
+            # If this is not the last segment, get children of this folder
+            if i < len(path_segments) - 1:
+                folder_url = f"{GRAPH_BASE}/sites/{site_id}/drives/{drive_id}/items/{current_folder_id}/children"
+                folder_resp = requests.get(folder_url, headers=headers)
+                if not folder_resp.ok:
+                    print(f"ERROR: Cannot access folder '{segment}': {folder_resp.status_code}")
+                    resp.raise_for_status()
+                current_items = folder_resp.json().get("value", [])
+        
+        # Now get children of the final folder
+        if current_folder_id:
+            final_url = f"{GRAPH_BASE}/sites/{site_id}/drives/{drive_id}/items/{current_folder_id}/children"
+            print(f"DEBUG: Accessing final folder via ID: {final_url}")
+            resp = requests.get(final_url, headers=headers)
+            if not resp.ok:
+                print(f"ERROR: Cannot access final folder: {resp.status_code} - {resp.text}")
+                resp.raise_for_status()
+        else:
+            resp.raise_for_status()
     items = resp.json().get("value", [])
     # Only CSVs
     return [it for it in items if it.get("name", "").lower().endswith(".csv")]
@@ -229,32 +336,78 @@ def read_tend_multisection_csv(path: str) -> pd.DataFrame:
 # ---------- Transform ----------
 
 def transform(df: pd.DataFrame) -> pd.DataFrame:
-    required = {
+    # Show what columns we actually have
+    print(f"DEBUG: Available columns in CSV: {sorted(df.columns.tolist())}")
+    
+    # Required columns (case-insensitive matching)
+    required_base = {
         "Task Id",
         "Task Type",
         "Start Date",
         "Planting",
         "Seeds Needed",
         "Location",
-        "In-row Spacing",
     }
-    missing = required - set(df.columns)
-    if missing:
-        raise ValueError(f"Missing required columns in parsed data: {sorted(missing)}")
+    
+    # Optional columns (try different variations)
+    optional = {
+        "In-row Spacing",
+        "In-Row Spacing",
+        "In row Spacing",
+        "In Row Spacing",
+    }
+    
+    # Normalize column names (case-insensitive)
+    df_columns_lower = {col.lower(): col for col in df.columns}
+    required_found = {}
+    missing_required = []
+    
+    for req_col in required_base:
+        req_lower = req_col.lower()
+        if req_lower in df_columns_lower:
+            required_found[req_col] = df_columns_lower[req_lower]
+        else:
+            missing_required.append(req_col)
+    
+    if missing_required:
+        raise ValueError(f"Missing required columns in parsed data: {sorted(missing_required)}\n"
+                        f"Available columns: {sorted(df.columns.tolist())}")
+    
+    # Find optional spacing column
+    spacing_col = None
+    for opt_col in optional:
+        opt_lower = opt_col.lower()
+        if opt_lower in df_columns_lower:
+            spacing_col = df_columns_lower[opt_lower]
+            print(f"DEBUG: Found spacing column: '{spacing_col}'")
+            break
+    
+    if not spacing_col:
+        print("WARNING: 'In-row Spacing' column not found, will set Spacing to None")
 
-    plant_name, variety = zip(*df["Planting"].map(split_planting))
+    # Use normalized column names
+    task_id_col = required_found["Task Id"]
+    task_type_col = required_found["Task Type"]
+    start_date_col = required_found["Start Date"]
+    planting_col = required_found["Planting"]
+    seeds_needed_col = required_found["Seeds Needed"]
+    location_col = required_found["Location"]
+
+    plant_name, variety = zip(*df[planting_col].map(split_planting))
 
     # Supabase Column Name : CSV Column Name mapping
+    spacing_data = df[spacing_col].map(to_number) if spacing_col else pd.Series([None] * len(df))
+    
     out = pd.DataFrame(
         {
-            "Tend ID": df["Task Id"].astype(str).str.strip(),
-            "task_type": df["Task Type"].astype(str).str.strip(), # not a supabase column, meant to map rows into either Direct or Transplant for Direct/Transplant column
-            "Date": df["Start Date"].map(parse_date),
+            "Tend ID": df[task_id_col].astype(str).str.strip(),
+            "task_type": df[task_type_col].astype(str).str.strip(), # not a supabase column, meant to map rows into either Direct or Transplant for Direct/Transplant column
+            "Date": df[start_date_col].map(parse_date),
             "Plant Name": pd.Series(plant_name, dtype="string"),
             "Variety": pd.Series(variety, dtype="string"),
-            "Quantity": df["Seeds Needed"].map(to_number),
-            "Location": df["Location"].astype(str).str.strip(),
-            "Spacing": df["In-row Spacing"].map(to_number),
+            "Quantity": df[seeds_needed_col].map(to_number),
+            "Location": df[location_col].astype(str).str.strip(),
+            "Spacing": spacing_data,
         }
     )
 
