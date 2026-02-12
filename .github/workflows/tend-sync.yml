@@ -22,6 +22,9 @@ jobs:
       MS_DRIVE_MODE: ${{ secrets.MS_DRIVE_MODE }}
       ONEDRIVE_USER_PRINCIPAL_NAME: ${{ secrets.ONEDRIVE_USER_PRINCIPAL_NAME }}
       ONEDRIVE_FOLDER_PATH: ${{ secrets.ONEDRIVE_FOLDER_PATH }}
+      SP_SITE_ID: ${{ secrets.SP_SITE_ID }}
+      SP_DRIVE_ID: ${{ secrets.SP_DRIVE_ID }}
+      SP_FOLDER_PATH: ${{ secrets.SP_FOLDER_PATH }}
 
     steps:
       - name: Checkout repo
